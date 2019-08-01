@@ -151,7 +151,6 @@ def check_num_bandas(rasters):
     return tot
 
 
-# ToDo: tornar só desc como obrigatório, pegar demais informações dele
 def cria_destino(path, nome, desc, ext='tif', extra=None):
     """ Cria caminho de onde será salvo algum Dataset.
 
@@ -175,24 +174,6 @@ def cria_destino(path, nome, desc, ext='tif', extra=None):
         path = os.path.dirname(desc)
 
     return f'{path}/{nome}.{ext}'
-
-
-# def cria_destino(path, nome, ext, extra=None):
-#
-#     if not ext:
-#         print('Erro: Falta ext')
-#         return None
-#     if not path:
-#         print('Erro: Falta path')
-#         return None
-#     if not nome:
-#         print('Erro: Falta nome')
-#         return None
-#
-#     if extra:
-#         nome += f'_{extra}'
-#
-#     return f'{path}/{nome}.{ext}'
 
 
 def compor_rgb(r, g, b, ext=TIFF, path=None, nome=None):
@@ -417,7 +398,6 @@ def mosaicar(rasters, nodata_value=0, path=None, nome=None):
 
         msc.FlushCache()
 
-
     else:
         print('Erro no mosaico')
 
@@ -592,25 +572,15 @@ def shp2raster(shape, pixel_wh=30, field=None, path=None, nome=None):
     return raster, dic_codes
 
 
-def segmentar(raster, scale, min_size, path=None, nome=None):
+def gdal2nparray(raster):
     """
 
     Args:
-        raster (gdal.Dataset):
-        path (str):
-        nome (str):
+        raster:
 
     Returns:
 
-
     """
-    if path:
-        if not os.path.exists(path):
-            print('Diretório não existe')
-            return None
-
-    # ToDo: pegar bandar separadas; transformar em arrays, juntar num np.array (imagem) e iniciar segmentação
-    # checando o preparando raster
     raster_t = type(raster)
 
     if raster_t is gdal.Dataset:
@@ -632,33 +602,52 @@ def segmentar(raster, scale, min_size, path=None, nome=None):
         print('Erro no tipo')
         return None
 
-    # seg2 = segmentation.quickshift(img, kernel_size=6, max_dist=15, sigma=0.5)
-    np_seg = segmentation.felzenszwalb(np_raster, scale=scale, min_size=min_size)
-    np_seg = np_seg + 1
+    return np_raster
 
-    # if not np_seg:
-    #     print('Erro na segmentação')
-    #     return None
 
-    dest = cria_destino(path, nome, raster.GetDescription(), extra='segmentation')
-    seg = gdal.GetDriverByName('GTiff').Create(dest, raster.RasterXSize, raster.RasterYSize, 1, gdal.GDT_UInt16)
-    seg.SetGeoTransform(raster.GetGeoTransform())
-    seg.SetProjection(raster.GetProjection())
-    seg.GetRasterBand(1).WriteArray(np_seg)
-    seg.FlushCache()
+def segmentar(raster, scale, min_size, path=None, nome=None):
+    """
 
-    if not seg:
-        print('Erro ao criar raster')
-        return None
+    Args:
+        raster (gdal.Dataset): Raster a ser segmentado
+        scale (int): Scale do algoritmo felzenszwalb
+        min_size (int): min_size do algoritmo felzenszwalb
+        path (str): diretório do arquivo
+        nome (str): nome do arquivo
 
-    return seg
-    # print(seg)
-    # fig = plt.figure(figsize=(8, 8))
-    # fig.add_subplot(2, 1, 1)
-    # plt.imshow(segmentation.mark_boundaries(img, seg2))
-    # fig.add_subplot(2, 1, 2)
-    # plt.imshow(segmentation.mark_boundaries(img, seg4))
-    # plt.show()
+    Returns:
+        (gdal.Dataset): Raster segmentado, onde cada região terá um valor de identificação único em seus pixels.
+
+
+    """
+    if path:
+        if not os.path.exists(path):
+            print('Diretório não existe')
+            return None
+
+    # ToDo: pegar bandar separadas; transformar em arrays, juntar num np.array (imagem) e iniciar segmentação
+
+    np_raster = gdal2nparray(raster)
+
+    if np_raster:
+
+        np_seg = segmentation.felzenszwalb(np_raster, scale=scale, min_size=min_size)
+        np_seg = np_seg + 1
+
+        dest = cria_destino(path, nome, raster.GetDescription(), extra='segmentation')
+        seg = gdal.GetDriverByName('GTiff').Create(dest, raster.RasterXSize, raster.RasterYSize, 1, gdal.GDT_UInt16)
+        seg.SetGeoTransform(raster.GetGeoTransform())
+        seg.SetProjection(raster.GetProjection())
+        seg.GetRasterBand(1).WriteArray(np_seg)
+        seg.FlushCache()
+
+        if not seg:
+            print('Erro ao criar raster')
+            return None
+
+        return seg
+
+    return None
 
 
 def calc_total_pixels(banda):
@@ -701,11 +690,6 @@ def extrair_carac_regiao(regiao):
     b3_npix = calc_total_pixels(b3)
     npix = calc_total_pixels(reg_g)
 
-    # b1_npix = len(b1)
-    # b2_npix = len(b2)
-    # b3_npix = len(b3)
-    # npix = len(reg_g)
-
     # média  # ToDO: fazer essa só dos histogramas?
     b1_mean = np.mean(b1)
     b2_mean = np.mean(b2)
@@ -737,11 +721,6 @@ def extrair_carac_regiao(regiao):
     features.append(variance(b2))
     features.append(variance(b3))
     features.append(variance(reg_g))
-
-    # b1_levels = b1.max() + 1
-    # b2_levels = b2.max() + 1
-    # b3_levels = b3.max() + 1
-    # levels = reg_g.max() + 1
 
     # histograma
     b1_hst = histogram(b1)[0]  # alterar nbins de acordo com dtype
