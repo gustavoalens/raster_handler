@@ -3,7 +3,7 @@ import numpy as np
 from skimage import segmentation
 from skimage.exposure import histogram
 from skimage.color import rgb2grey
-from skimage.feature import local_binary_pattern
+from skimage.feature import local_binary_pattern, hog, greycomatrix, greycoprops
 from skimage import img_as_uint
 from scipy.stats import entropy, kurtosis
 from scipy.ndimage import variance
@@ -268,7 +268,7 @@ def alterar_ref_espacial(raster, ref_nova, path=None, nome=None):
 
     Args:
         raster (gdal.Dataset): gdal.Dataset que se deseja alterar referência
-        ref_nova (int): tipo de referência pelo padrão EPSG. Exemplo: 4628
+        ref_nova (Union[int, str]): tipo de referência pelo padrão EPSG. Exemplo: 4628
         path (str): caminho do diretório de saída do arquivo raster. Default:
         nome (str): nome para o raster. Default: {nome atual}_EPSG:{ref_nova}
 
@@ -281,8 +281,12 @@ def alterar_ref_espacial(raster, ref_nova, path=None, nome=None):
     if type(raster) is not gdal.Dataset:
         print('Não é um gdal.Dataset')
         return None
-    if type(ref_nova) is not int:  # ToDo: tentar converter para int antes
-        print('Projeção precisa ser padrão EPSG')
+    if type(ref_nova) is not int:
+        try:
+            ref_nova = int(ref_nova)
+        except TypeError:
+            print('Projeção precisa ser só o valor inteiro do padrão EPSG')
+
         return None
 
     if path:
@@ -606,7 +610,7 @@ def gdal2nparray(raster):
 
 
 def segmentar(raster, scale, min_size, path=None, nome=None):
-    """
+    """Segmenta um raster em regiões por meio do algoritmo felzenszwalb
 
     Args:
         raster (gdal.Dataset): Raster a ser segmentado
@@ -624,8 +628,6 @@ def segmentar(raster, scale, min_size, path=None, nome=None):
         if not os.path.exists(path):
             print('Diretório não existe')
             return None
-
-    # ToDo: pegar bandar separadas; transformar em arrays, juntar num np.array (imagem) e iniciar segmentação
 
     np_raster = gdal2nparray(raster)
 
@@ -669,16 +671,27 @@ def calc_energia(hst, npix):
     return np.sum(prob ** 2)
 
 
-def extrair_carac_regiao(regiao):
+def extrair_carac_regiao(regiao, caracteristicas):
     """
         Extração das caracterísitcas:
+            - hog: Histogram of Oriented Gradients
+            - media: media dos valores do pixel de cada banda
+            - dsv_p: desvio padrão dos valores do pixel de cada banda
+            - ast: assimetria
+            - var: variancia
+            - ent: entropia
+            - crt: curtose
+            - glcm: Grey level Co-occurrence Matrix (contraste, dissimilaridade, homogeneidade, ASM, energia, correlação)
+            - lbp: Local Binary Pattern
     Args:
         regiao (Union[np.ndarray, np.ma.core.MaskedArray]): região de imagem que será extraída as características
+        caracteristicas (list of str): lista de características a serem extraídas
 
     Returns:
         (list of float): lista de características extraídas
     """
-    features = list()
+
+    features = pd.DataFrame()
     b1 = regiao[..., 0]
     b2 = regiao[..., 1]
     b3 = regiao[..., 2]
@@ -690,147 +703,178 @@ def extrair_carac_regiao(regiao):
     b3_npix = calc_total_pixels(b3)
     npix = calc_total_pixels(reg_g)
 
-    # média  # ToDO: fazer essa só dos histogramas?
-    b1_mean = np.mean(b1)
-    b2_mean = np.mean(b2)
-    b3_mean = np.mean(b3)
-    mean = np.mean(reg_g)
-    features.append(b1_mean)
-    features.append(b2_mean)
-    features.append(b3_mean)
-    features.append(mean)
+    # média
+    b1_mean = b2_mean = b3_mean = mean = None
+    if 'media' in caracteristicas:
+        b1_mean = np.mean(b1)
+        b2_mean = np.mean(b2)
+        b3_mean = np.mean(b3)
+        mean = np.mean(reg_g)
 
+        features = features.assign(media=[[b1_mean, b2_mean, b3_mean, mean]])
+
+    b1_std = b2_std = b3_std = std = None
     # desvio padrão
-    b1_std = np.std(b1)
-    b2_std = np.std(b2)
-    b3_std = np.std(b3)
-    std = np.std(reg_g)
-    features.append(b1_std)
-    features.append(b2_std)
-    features.append(b3_std)
-    features.append(std)
+    if 'dsv_p' in caracteristicas:
+        b1_std = np.std(b1)
+        b2_std = np.std(b2)
+        b3_std = np.std(b3)
+        std = np.std(reg_g)
+
+        features = features.assign(dsv_p=[[b1_std, b2_std, b3_std, std]])
 
     # assimetria
-    features.append(calc_assimetria(b1, b1_mean, b1_std, b1_npix))
-    features.append(calc_assimetria(b2, b2_mean, b2_std, b2_npix))
-    features.append(calc_assimetria(b3, b3_mean, b3_std, b3_npix))
-    features.append(calc_assimetria(reg_g, mean, std, npix))
+    if 'ast' in caracteristicas:
+        if not b1_mean:
+            b1_mean = np.mean(b1)
+            b2_mean = np.mean(b2)
+            b3_mean = np.mean(b3)
+            mean = np.mean(reg_g)
+        if not b1_std:
+            b1_std = np.std(b1)
+            b2_std = np.std(b2)
+            b3_std = np.std(b3)
+            std = np.std(reg_g)
+
+        b1_ast = calc_assimetria(b1, b1_mean, b1_std, b1_npix)
+        b2_ast = calc_assimetria(b2, b2_mean, b2_std, b2_npix)
+        b3_ast = calc_assimetria(b3, b3_mean, b3_std, b3_npix)
+        ast = calc_assimetria(reg_g, mean, std, npix)
+
+        features = features.assign(ast=[[b1_ast, b2_ast, b3_ast, ast]])
 
     # variancia
-    features.append(variance(b1))
-    features.append(variance(b2))
-    features.append(variance(b3))
-    features.append(variance(reg_g))
+    if 'var' in caracteristicas:
+        b1_var = variance(b1)
+        b2_var = variance(b1)
+        b3_var = variance(b1)
+        var = variance(reg_g)
+
+        features = features.assign(var=[[b1_var, b2_var, b3_var, var]])
 
     # histograma
-    b1_hst = histogram(b1)[0]  # alterar nbins de acordo com dtype
-    b2_hst = histogram(b2)[0]  # alterar nbins de acordo com dtype
-    b3_hst = histogram(b3)[0]  # alterar nbins de acordo com dtype
-    hst = histogram(reg_g)[0]
+    if 'ent' or 'crt' in caracteristicas:
+        b1_hst, _ = histogram(b1, nbins=b1.max())  # alterar nbins de acordo com dtype
+        b2_hst, _ = histogram(b2, nbins=b2.max())  # alterar nbins de acordo com dtype
+        b3_hst, _ = histogram(b3, nbins=b3.max())  # alterar nbins de acordo com dtype
+        hst, _ = histogram(reg_g, nbins=reg_g.max())
 
-    # energia - hst  # ToDO: Checar esse calculo (por ora não achei se isso está correto)
-    features.append(calc_energia(b1_hst, b1_npix))
-    features.append(calc_energia(b2_hst, b2_npix))
-    features.append(calc_energia(b3_hst, b3_npix))  # ToDO: npix deve ser referente ao histograma, idem abaixo
-    features.append(calc_energia(hst, npix))
+        # entropia  - hst
+        if 'ent' in caracteristicas:
+            b1_ent = entropy(b1_hst)
+            b2_ent = entropy(b2_hst)
+            b3_ent = entropy(b3_hst)
+            ent = entropy(hst)
 
-    # entropia  - hst
-    features.append(entropy(b1_hst))
-    features.append(entropy(b2_hst))
-    features.append(entropy(b3_hst))
-    features.append(entropy(hst))
+            features = features.assign(ent=[[b1_ent, b2_ent, b3_ent, ent]])
 
-    # curtose - hst
-    features.append(kurtosis(b1_hst))
-    features.append(kurtosis(b2_hst))
-    features.append(kurtosis(b3_hst))
-    features.append(kurtosis(hst))
+        # curtose - hst
+        if 'crt' in caracteristicas:
+            b1_crt = kurtosis(b1_hst)
+            b2_crt = kurtosis(b2_hst)
+            b3_crt = kurtosis(b3_hst)
+            crt = kurtosis(hst)
 
-    # lbp_hst
-    b1_lbp = local_binary_pattern(b1, 10, np.pi / 2)
-    b2_lbp = local_binary_pattern(b2, 10, np.pi / 2)
-    b3_lbp = local_binary_pattern(b3, 10, np.pi / 2)
-    lbp = local_binary_pattern(reg_g, 10, np.pi / 2)
+            features = features.assign(crt=[[b1_crt, b2_crt, b3_crt, crt]])
 
-    b1_lbp_hst = histogram(b1_lbp)[0]
-    b2_lbp_hst = histogram(b2_lbp)[0]
-    b3_lbp_hst = histogram(b3_lbp)[0]
-    lbp_hst = histogram(lbp)[0]
+    # lbp
+    if 'lbp' in caracteristicas:
+        b1_lbp = local_binary_pattern(b1, 1, np.pi / 2)
+        b2_lbp = local_binary_pattern(b2, 1, np.pi / 2)
+        b3_lbp = local_binary_pattern(b3, 1, np.pi / 2)
+        lbp = local_binary_pattern(reg_g, 1, np.pi / 2)
 
-    b1_npix = calc_total_pixels(b1_lbp)
-    b2_npix = calc_total_pixels(b2_lbp)
-    b3_npix = calc_total_pixels(b3_lbp)
-    npix = calc_total_pixels(lbp)
+        b1_lbp_h, _ = histogram(b1_lbp.ravel())
+        b2_lbp_h, _ = histogram(b2_lbp.ravel())
+        b3_lbp_h, _ = histogram(b3_lbp.ravel())
+        lbp_h, _ = histogram(lbp)
 
-    # # energia - lbp_hst # ToDO: idem energia - hst
-    features.append(calc_energia(b1_lbp_hst, b1_npix))
-    features.append(calc_energia(b2_lbp_hst, b2_npix))
-    features.append(calc_energia(b3_lbp_hst, b3_npix))
-    features.append(calc_energia(lbp_hst, npix))
+        b1_min = b1_lbp_h.min()
+        b2_min = b2_lbp_h.min()
+        b3_min = b3_lbp_h.min()
+        min = lbp_h.min()
 
-    # entropia  - lbp_hst
-    features.append(entropy(b1_lbp_hst))
-    features.append(entropy(b2_lbp_hst))
-    features.append(entropy(b3_lbp_hst))
-    features.append(entropy(lbp_hst))
+        b1_lbp_h = (b1_lbp_h - b1_min) / (b1_lbp_h.max() - b1_min)
+        b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
+        b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
 
-    # curtose - lbp_hst
-    features.append(kurtosis(b1_lbp_hst))
-    features.append(kurtosis(b2_lbp_hst))
-    features.append(kurtosis(b3_lbp_hst))
-    features.append(kurtosis(lbp_hst))
+        b1_lbp_h = (b1_lbp_h - b1_min) / (b1_lbp_h.max() - b1_min)
+        b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
+        b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
+        lbp_h = (lbp_h - min) / (lbp_h.max() - min)
 
-    # # glcm
-    # b1_glcm = greycomatrix(b1, [1], [1], levels=b1_levels)
-    # b2_glcm = greycomatrix(b2, [1], [1], levels=b2_levels)
-    # b3_glcm = greycomatrix(b3, [1], [1], levels=b3_levels)
-    # glcm = greycomatrix(reg_g, [1], [1], levels=levels)
-    #
-    # # contrast
-    # features.append(greycoprops(b1_glcm, 'contrast')[0][0])
-    # features.append(greycoprops(b2_glcm, 'contrast')[0][0])
-    # features.append(greycoprops(b3_glcm, 'contrast')[0][0])
-    # features.append(greycoprops(glcm, 'contrast')[0][0])
-    #
-    # # dissimilarity
-    # features.append(greycoprops(b1_glcm, 'dissimilarity')[0][0])
-    # features.append(greycoprops(b2_glcm, 'dissimilarity')[0][0])
-    # features.append(greycoprops(b3_glcm, 'dissimilarity')[0][0])
-    # features.append(greycoprops(glcm, 'dissimilarity')[0][0])
-    #
-    # # homogeneity
-    # features.append(greycoprops(b1_glcm, 'homogeneity')[0][0])
-    # features.append(greycoprops(b2_glcm, 'homogeneity')[0][0])
-    # features.append(greycoprops(b3_glcm, 'homogeneity')[0][0])
-    # features.append(greycoprops(glcm, 'homogeneity')[0][0])
-    #
-    # # energy
-    # features.append(greycoprops(b1_glcm, 'energy')[0][0])
-    # features.append(greycoprops(b2_glcm, 'energy')[0][0])
-    # features.append(greycoprops(b3_glcm, 'energy')[0][0])
-    # features.append(greycoprops(glcm, 'energy')[0][0])
-    #
-    # # correlation
-    # features.append(greycoprops(b1_glcm, 'correlation')[0][0])
-    # features.append(greycoprops(b2_glcm, 'correlation')[0][0])
-    # features.append(greycoprops(b3_glcm, 'correlation')[0][0])
-    # features.append(greycoprops(glcm, 'correlation')[0][0])
-    #
-    # # ASM
-    # features.append(greycoprops(b1_glcm, 'ASM')[0][0])
-    # features.append(greycoprops(b2_glcm, 'ASM')[0][0])
-    # features.append(greycoprops(b3_glcm, 'ASM')[0][0])
-    # features.append(greycoprops(glcm, 'ASM')[0][0])
+        features = features.assign(lbp=[[b1_lbp_h, b2_lbp_h, b3_lbp_h, lbp_h]])
+
+    # hog
+    if 'hog' in caracteristicas:
+        h = hog(regiao, block_norm='L2-Hys', visualize=False, feature_vector=True, multichannel=True)
+        features = features.assign(hog=[h])
+
+    # glcm
+    if 'glcm' in caracteristicas:
+        b1_glcm = greycomatrix(b1, [10], [np.pi/2], levels=b1.max() + 1)
+        b2_glcm = greycomatrix(b2, [10], [np.pi/2], levels=b2.max() + 1)
+        b3_glcm = greycomatrix(b3, [10], [np.pi/2], levels=b3.max() + 1)
+        glcm = greycomatrix(reg_g, [10], [np.pi/2], levels=reg_g.max() + 1)
+
+        glcm_res = list()
+        # contrast
+        glcm_res.append(greycoprops(b1_glcm, 'contrast')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'contrast')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'contrast')[0][0])
+        glcm_res.append(greycoprops(glcm, 'contrast')[0][0])
+
+        # dissimilarity
+        glcm_res.append(greycoprops(b1_glcm, 'dissimilarity')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'dissimilarity')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'dissimilarity')[0][0])
+        glcm_res.append(greycoprops(glcm, 'dissimilarity')[0][0])
+
+        # homogeneity
+        glcm_res.append(greycoprops(b1_glcm, 'homogeneity')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'homogeneity')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'homogeneity')[0][0])
+        glcm_res.append(greycoprops(glcm, 'homogeneity')[0][0])
+
+        # energy
+        glcm_res.append(greycoprops(b1_glcm, 'energy')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'energy')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'energy')[0][0])
+        glcm_res.append(greycoprops(glcm, 'energy')[0][0])
+
+        # correlation
+        glcm_res.append(greycoprops(b1_glcm, 'correlation')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'correlation')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'correlation')[0][0])
+        glcm_res.append(greycoprops(glcm, 'correlation')[0][0])
+
+        # ASM
+        glcm_res.append(greycoprops(b1_glcm, 'ASM')[0][0])
+        glcm_res.append(greycoprops(b2_glcm, 'ASM')[0][0])
+        glcm_res.append(greycoprops(b3_glcm, 'ASM')[0][0])
+        glcm_res.append(greycoprops(glcm, 'ASM')[0][0])
+
+        features = features.assign(glcm=[glcm_res])
 
     return features
 
 
-def extrair_caracteristicas(raster, mask):
+def extrair_caracteristicas(raster, mask, caracteristicas):
     """
-        Separa a imagem nas regiões definidas da máscara e executa a função de extração para cada região
+        Separa a imagem nas regiões definidas da máscara e executa a função de extração para cada região.
+        Extração das caracterísitcas:
+            - hog: Histogram of Oriented Gradients
+            - media: media dos valores do pixel de cada banda
+            - dsv_p: desvio padrão dos valores do pixel de cada banda
+            - var: variancia
+            - entr: entropia
+            - crt: curtose
+            - glcm: Grey level Co-occurrence Matrix (contraste, dissimilaridade, homogeneidade, ASM, energia, correlação)
+            - lbp: Local Binary Pattern
     Args:
         raster (Union[gdal.Dataset, np.ndarray]): raster a sofrer a extração de características
         mask (Union[gdal.Dataset, np.ndarray]): raster máscara que define as divisões das regiões
+        caracteristicas (list of str): lista de características a serem extraídas
 
     Returns:
         (pd.DataFrame): DataFrame com todas as características extraídas de todas regiões
@@ -847,12 +891,13 @@ def extrair_caracteristicas(raster, mask):
             bandas[i] = bandas[i].ReadAsArray()
 
         np_raster = np.dstack(tuple(bandas))
+        # np_raster = gdal2nparray(bandas)
 
     elif raster_t is np.ndarray:
         np_raster = raster
 
     else:
-        print('Erro no tipo')
+        print('!Erro no tipo')
         return None
 
     # checando o preparando mask
@@ -867,7 +912,12 @@ def extrair_caracteristicas(raster, mask):
         print('Erro no tipo')
         return None
 
-    features_list = list()
+    for c in caracteristicas:
+        if c not in ['hog', 'media', 'dsv_p', 'var', 'entr', 'crt', 'glcm', 'lbp']:
+            print('Erro: característica inválida')
+            return None
+
+    features = pd.DataFrame(columns=caracteristicas)
     regioes = np.unique(np_mask)
     regioes = np.delete(regioes, 0)
     for reg in regioes:
@@ -884,25 +934,12 @@ def extrair_caracteristicas(raster, mask):
             fill_value=0
         )
 
-        ftr_regiao = [reg]
+        ftr_regiao = extrair_carac_regiao(np_reg, caracteristicas)
+        ftr_regiao = ftr_regiao.assign(reg=reg)
 
-        ftr_regiao += extrair_carac_regiao(np_reg)
-        features_list.append(ftr_regiao)
+        features = features.append(ftr_regiao, ignore_index=True, sort=False)
 
-    columns = ['fid',
-               'media_b1', 'media_b2', 'media_b3', 'media',
-               'dsv_p_b1', 'dsv_p_b2', 'dsv_p_b3', 'dsv_p',
-               'ass_b1', 'ass_b2', 'ass_b3', 'ass',
-               'varc_b1', 'varc_b2', 'varc_b3', 'varc',
-               'energ_b1', 'energ_b2', 'energ_b3', 'energ',
-               'etrp_b1', 'etrp_b2', 'etrp_b3', 'etrp',
-               'crts_b1', 'crts_b2', 'crts_b3', 'crts',
-               'lbp_energ_b1', 'lbp_energ_b2', 'lbp_energ_b3', 'lbp_energ',
-               'lbp_etrp_b1', 'lbp_etrp_b2', 'lbp_etrp_b3', 'lbp_etrp',
-               'lbp_crts_b1', 'lbp_crts_b2', 'lbp_crts_b3', 'lbp_crts',
-               ]
-
-    return pd.DataFrame(features_list, columns=columns).set_index('fid')
+    return features
 
 
 def filtrar(raster, path=None, nome=None):
