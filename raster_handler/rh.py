@@ -1,20 +1,26 @@
 from osgeo import gdal, ogr
-import numpy as np
+
 from skimage import segmentation
 from skimage.exposure import histogram
 from skimage.color import rgb2grey
 from skimage.feature import local_binary_pattern, hog, greycomatrix, greycoprops
 from skimage import img_as_uint
+
 from scipy.stats import entropy, kurtosis
 from scipy.ndimage import variance
+
 import pandas as pd
 
+import tensorflow as tf
+
 from typing import Union
+import numpy as np
 import os
 from tempfile import gettempdir
 
 """
 """
+# tf.compat.v1.enable_eager_execution()
 
 # - Constantes - #
 TIFF = 'GTiff'
@@ -174,6 +180,21 @@ def cria_destino(path, nome, desc, ext='tif', extra=None):
         path = os.path.dirname(desc)
 
     return f'{path}/{nome}.{ext}'
+
+
+def csv_str_list2list(str_list, tipo):
+    """
+    Função para converter lista salva em csv para o tipo correto dos itens
+
+    Args:
+        str_list (str): lista em string, geralmente como fica salvo lista em csv pelo Pandas
+        tipo (function): função de conversão do tipo. Ex: float, int
+
+    Returns (list): Retorna uma lista com os itens do tipo do parâmetro
+
+    """
+    # ToDo: checar se é lista e conv é função
+    return [tipo(x) for x in str_list.strip('[]').split(', ')]
 
 
 def compor_rgb(r, g, b, ext=TIFF, path=None, nome=None):
@@ -794,6 +815,9 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b3_min = b3_lbp_h.min()
         min = lbp_h.min()
 
+        # ToDo: melhorar normalização
+        #   -> checar se só serão utilizados o primeiro e o último do histograma
+        #       (possivelmente mudar o nbins do histogram resolve)
         b1_lbp_h = (b1_lbp_h - b1_min) / (b1_lbp_h.max() - b1_min)
         b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
         b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
@@ -802,13 +826,12 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
         b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
         lbp_h = (lbp_h - min) / (lbp_h.max() - min)
-
-        features = features.assign(lbp=[[b1_lbp_h, b2_lbp_h, b3_lbp_h, lbp_h]])
+        features = features.assign(lbp_b1=[list(b1_lbp_h)], lbp_b2=[list(b2_lbp_h)], lbp_b3=[list(b3_lbp_h)], lbp=[list(lbp_h)])
 
     # hog
     if 'hog' in caracteristicas:
         h = hog(regiao, block_norm='L2-Hys', visualize=False, feature_vector=True, multichannel=True)
-        features = features.assign(hog=[h])
+        features = features.assign(hog=[list(h)])
 
     # glcm
     if 'glcm' in caracteristicas:
@@ -935,7 +958,7 @@ def extrair_caracteristicas(raster, mask, caracteristicas):
         )
 
         ftr_regiao = extrair_carac_regiao(np_reg, caracteristicas)
-        ftr_regiao = ftr_regiao.assign(reg=reg)
+        ftr_regiao = ftr_regiao.assign(reg=int(reg))
 
         features = features.append(ftr_regiao, ignore_index=True, sort=False)
 
@@ -961,8 +984,79 @@ def filtrar(raster, path=None, nome=None):
     dest = cria_destino(path, nome, raster.GetDescription())
 
 
-def treinar_class(raster, tclass, mask=None, features=None):
-    pass
+def treinar_modelo(df_train, tipo_class, class_col='classe', id_col=None, df_eval=None):
+    """
+
+    Args:
+        df_train (pd.DataFrame): dados de treinamento
+        tipo_class (str): tipo de classificador (rna, svm)
+        class_col (str):
+        id_col (str):
+        df_eval (pd.DataFrame: dados para testar
+
+    Returns:
+
+    """
+    # ToDo: verificar item por item do dataframe se são object(ou é str ou será lista)
+    #   -> se for str, transformar em category
+    #   -> se for lista, transformar em ndarray
+    #   -> se for float ou int, colocar em lista e converter para ndarray
+    df_train_c = df_train.copy()
+
+    if id_col:
+        df_train_c.pop(id_col)
+
+    target = df_train_c.pop(class_col)
+
+    data_train_flatted = [np.concatenate(x).ravel().tolist() for x in df_train_c.values]
+    nodos = len(data_train_flatted[0])
+
+    ds_train = tf.data.Dataset.from_tensor_slices((data_train_flatted, target.values))
+    ds_train = ds_train.shuffle(buffer_size=len(df_train_c))
+    aux = int(nodos / 10)
+    batch_size = aux if aux > 0 else 1
+    ds_train = ds_train.batch(batch_size)
+    # ToDo: estudar sobre batch e definir valor
+
+    if tipo_class.lower() == 'rna':
+        keras = tf.keras
+        modelo = keras.Sequential([
+            # keras.layers.DenseFeatures(features_columns),
+            keras.layers.Input(nodos, name='input'),
+            keras.layers.Dense(30, tf.nn.relu, name='inter_1'),
+            keras.layers.Dense(30, tf.nn.relu, name='inter_2'),
+            keras.layers.Dense(1, tf.nn.sigmoid, name='final')
+        ])  # ToDo: definir ultima camada com número de quantidade de classes
+
+        # ToDo: verificar melhor forma de calcular as métricas
+        modelo.compile(
+            optimizer=tf.compat.v1.train.GradientDescentOptimizer(0.01),
+            loss=keras.losses.mean_squared_error,
+            # optimizer='adam',
+            # loss='binary_crossentropy',
+            metrics=[
+                # keras.metrics.mean_squared_error,
+                # keras.metrics.mean_absolute_error,
+                # keras.metrics.sparse_categorical_accuracy,
+                # keras.metrics.sparse_categorical_crossentropy,
+                # keras.metrics.sparse_top_k_categorical_accuracy,
+                # tf.metrics.false_negatives
+                'accuracy'
+                # tf.metrics.mean_absolute_error
+                # tf.metrics.root_mean_squared_error,
+                # tf.metrics.accuracy,
+                # tf.metrics.false_negatives
+            ]  # ,
+            # run_eagerly=True
+        )
+
+        modelo.fit(ds_train, epochs=3)
+        modelo.predict_classes(ds_train, None)
+        predict = modelo.predict(ds_train)
+        acc = tf.summary.scalar('accuracy', tf.metrics.accuracy(target, predict))
+
+        print(list(tf.metrics.precision(target, predict)))
+        return modelo, ds_train
 
 
 def classificar(raster, classificador, path=None, nome=None):
