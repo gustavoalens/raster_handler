@@ -12,6 +12,8 @@ from scipy.ndimage import variance
 import pandas as pd
 
 import tensorflow as tf
+from sklearn import svm
+from sklearn import metrics
 
 from typing import Union
 import numpy as np
@@ -24,7 +26,7 @@ from tempfile import gettempdir
 
 # - Constantes - #
 TIFF = 'GTiff'
-RN = 0
+RNA = 0
 SVM = 1
 CI_RGB = {1: gdal.GCI_RedBand, 2: gdal.GCI_GreenBand, 3: gdal.GCI_BlueBand}
 DTYPE_CVT = {gdal.GDT_Byte: np.uint8, gdal.GDT_UInt16: np.uint16}
@@ -800,10 +802,10 @@ def extrair_carac_regiao(regiao, caracteristicas):
 
     # lbp
     if 'lbp' in caracteristicas:
-        b1_lbp = local_binary_pattern(b1, 1, np.pi / 2)
-        b2_lbp = local_binary_pattern(b2, 1, np.pi / 2)
-        b3_lbp = local_binary_pattern(b3, 1, np.pi / 2)
-        lbp = local_binary_pattern(reg_g, 1, np.pi / 2)
+        b1_lbp = local_binary_pattern(b1, 8, 1, method='ror')
+        b2_lbp = local_binary_pattern(b2, 8, 1, method='ror')
+        b3_lbp = local_binary_pattern(b3, 8, 1, method='ror')
+        lbp = local_binary_pattern(reg_g, 8, 1, method='ror')
 
         b1_lbp_h, _ = histogram(b1_lbp.ravel())
         b2_lbp_h, _ = histogram(b2_lbp.ravel())
@@ -813,7 +815,7 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b1_min = b1_lbp_h.min()
         b2_min = b2_lbp_h.min()
         b3_min = b3_lbp_h.min()
-        min = lbp_h.min()
+        mini = lbp_h.min()
 
         # ToDo: melhorar normalização
         #   -> checar se só serão utilizados o primeiro e o último do histograma
@@ -825,12 +827,13 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b1_lbp_h = (b1_lbp_h - b1_min) / (b1_lbp_h.max() - b1_min)
         b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
         b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
-        lbp_h = (lbp_h - min) / (lbp_h.max() - min)
+        lbp_h = (lbp_h - mini) / (lbp_h.max() - mini)
         features = features.assign(lbp_b1=[list(b1_lbp_h)], lbp_b2=[list(b2_lbp_h)], lbp_b3=[list(b3_lbp_h)], lbp=[list(lbp_h)])
 
     # hog
     if 'hog' in caracteristicas:
-        h = hog(regiao, block_norm='L2-Hys', visualize=False, feature_vector=True, multichannel=True)
+        h = hog(regiao, block_norm='L2-Hys', visualize=False, feature_vector=True, multichannel=True,
+                pixels_per_cell=(16, 16))
         features = features.assign(hog=[list(h)])
 
     # glcm
@@ -984,96 +987,335 @@ def filtrar(raster, path=None, nome=None):
     dest = cria_destino(path, nome, raster.GetDescription())
 
 
-def treinar_modelo(df_train, tipo_class, class_col='classe', id_col=None, df_eval=None):
+def series2array(df, cols_ignore):
     """
 
     Args:
-        df_train (pd.DataFrame): dados de treinamento
-        tipo_class (str): tipo de classificador (rna, svm)
-        class_col (str):
-        id_col (str):
-        df_eval (pd.DataFrame: dados para testar
+        df(pd.DataFrame):
+        cols_ignore(Union[str, list]):
 
     Returns:
 
     """
-    # ToDo: verificar item por item do dataframe se são object(ou é str ou será lista)
-    #   -> se for str, transformar em category
-    #   -> se for lista, transformar em ndarray
-    #   -> se for float ou int, colocar em lista e converter para ndarray
-    df_train_c = df_train.copy()
 
+    if type(cols_ignore) is str:
+        cols_ignore = [cols_ignore]
+
+    for col in df.columns:
+        if col not in cols_ignore:
+            df[col] = df[col].map(lambda x: np.array(x))
+    return df
+
+
+def prepara_features(df, class_col='classe'):
+    """
+    
+    Args:
+        df (pd.DataFrame): 
+        class_col (str): 
+
+    Returns:
+        (list, pd.Series)
+
+    """
+    target = df.pop(class_col)
+    data_flatted = [np.concatenate(x).ravel().tolist() for x in df.values]
+    return data_flatted, target.values
+
+
+def treinar_modelo(df_train, tipo_class, df_eval=None, class_col='classe', id_col=None, val_split=0.75,
+                   classificador=None, params=None):
+    """
+    Ajusta um modelo de classificação a partir de uma base de conhecimento, podendo ser uma Rede Neural Artificial (RNA)
+    -Multilayer Perceptron- ou Máquina de Vetores de Suporte (SVM).
+    parametros possíveis de cada classificador (utilizando o dicicionário params):
+        - RNA:
+            - hidden_units: lista com a quantidade de nós em cada layer. exemplo: [50, 50, 50], default: [10]
+            - learning rate: valor de aprendizado do algoritmo otimizador. default: 0.01
+            - steps: repetições do treinamento (backpropagation). Padrão 10000
+        - SVM:
+            - kernel: tipo de kernel trick (linear, poly, rbg, sigmoid). default: linear
+            - degree: graus do kernel trick polinomial (poly). default: 3
+            - gamma: coeficiente do kernel (auto, scale)
+            - coef0: termo idependente dos kernel tricks sigmoid e poly
+            - tol: tolerancia para o critério de parada. default: 1e-3
+
+
+    Args:
+        df_train (pd.DataFrame): base de dados para treinamento
+        tipo_class (int): tipo de classificador (rh.RNA, rh.SVM)
+        df_eval (pd.DataFrame): base de dados para teste (Opcional)
+        class_col (str): nome da coluna com as classes
+        id_col (str): nome da coluna de identificação única de cada tupla de dado, se houver
+        val_split(float): valor utilizado para dividir a base de treinamento, caso não houver uma base para testes
+        classificador (Union[tf.estimator.DNNClassifier, svm.SVC]): classificador para treinar em uma nova base
+        params (dict): parametros para criação dos classificadores
+
+    Returns:
+
+    """
+
+    # checando erros
+    if type(df_train) is not pd.DataFrame:
+        print('Erro: erro do tipo da DataFrame')
+        return None
+
+    accepted_params = ['learning_rate', 'hidden_units', 'steps', 'kernel', 'degree', 'gamma', 'coef0', 'tol']
+    if not params:
+        params = dict()
+    else:
+        for key in params:
+            if key not in accepted_params:
+                print('Parametro não reconhecido')
+                return None
+
+    # copiando dataframe de treinamento
+    df_train_c = df_train.copy()
+    # retirando coluna de id único caso tenha no dataframe
     if id_col:
         df_train_c.pop(id_col)
+    df_train_c = series2array(df_train_c, class_col)
 
-    target = df_train_c.pop(class_col)
+    if df_eval is not None:
+        df_eval_c = df_eval.copy()
+        if id_col:
+            df_eval_c.pop(id_col)
+        df_eval_c = series2array(df_eval_c, class_col)
+    else:
+        if 0 < val_split < 1:
+            all_data = df_train_c.sample(len(df_train_c)).reset_index(drop=True)
+            split = int(len(df_train_c) * val_split)
+            df_train_c = all_data.iloc[:split].reset_index(drop=True)
+            df_eval_c = all_data.iloc[split:].reset_index(drop=True)
+        else:
+            print('Sem dados para avaliar')
+            return None
 
-    data_train_flatted = [np.concatenate(x).ravel().tolist() for x in df_train_c.values]
-    nodos = len(data_train_flatted[0])
+    data_train_flatted, target = prepara_features(df_train_c, class_col)
+    data_eval_flatted, target_ev = prepara_features(df_eval_c, class_col)
 
-    ds_train = tf.data.Dataset.from_tensor_slices((data_train_flatted, target.values))
-    ds_train = ds_train.shuffle(buffer_size=len(df_train_c))
-    aux = int(nodos / 10)
-    batch_size = aux if aux > 0 else 1
-    ds_train = ds_train.batch(batch_size)
-    # ToDo: estudar sobre batch e definir valor
+    if tipo_class == RNA:
 
-    if tipo_class.lower() == 'rna':
-        keras = tf.keras
-        modelo = keras.Sequential([
-            # keras.layers.DenseFeatures(features_columns),
-            keras.layers.Input(nodos, name='input'),
-            keras.layers.Dense(30, tf.nn.relu, name='inter_1'),
-            keras.layers.Dense(30, tf.nn.relu, name='inter_2'),
-            keras.layers.Dense(1, tf.nn.sigmoid, name='final')
-        ])  # ToDo: definir ultima camada com número de quantidade de classes
+        # salvando labels e quantidade
+        lbs = np.sort(np.unique(target))
+        n_classes = len(lbs)
 
-        # ToDo: verificar melhor forma de calcular as métricas
-        modelo.compile(
-            optimizer=tf.compat.v1.train.GradientDescentOptimizer(0.01),
-            loss=keras.losses.mean_squared_error,
-            # optimizer='adam',
-            # loss='binary_crossentropy',
-            metrics=[
-                # keras.metrics.mean_squared_error,
-                # keras.metrics.mean_absolute_error,
-                # keras.metrics.sparse_categorical_accuracy,
-                # keras.metrics.sparse_categorical_crossentropy,
-                # keras.metrics.sparse_top_k_categorical_accuracy,
-                # tf.metrics.false_negatives
-                'accuracy'
-                # tf.metrics.mean_absolute_error
-                # tf.metrics.root_mean_squared_error,
-                # tf.metrics.accuracy,
-                # tf.metrics.false_negatives
-            ]  # ,
-            # run_eagerly=True
-        )
+        # readequando nivel de labels para 0 -> n_classes - 1
+        lbs_map = list(enumerate(lbs))
+        lbs_dic = dict()
+        for lb in lbs_map:
+            lbs_dic[lb[1]] = lb[0]
+        lbs_dic_ = dict(zip(lbs_dic.values(), lbs_dic.keys()))
+        for i in range(len(target)):
+            target[i] = lbs_dic[target[i]]
+        for i in range(len(target_ev)):
+            target_ev[i] = lbs_dic[target_ev[i]]
 
-        modelo.fit(ds_train, epochs=3)
-        modelo.predict_classes(ds_train, None)
-        predict = modelo.predict(ds_train)
-        acc = tf.summary.scalar('accuracy', tf.metrics.accuracy(target, predict))
+        # transformando em Tensor
+        ds_train = tf.data.Dataset.from_tensor_slices((data_train_flatted, target))
+        ds_train = ds_train.shuffle(buffer_size=len(df_train_c))
+        ds_eval = tf.data.Dataset.from_tensor_slices((data_eval_flatted, target_ev))
+        ds_eval = ds_eval.batch(1)
 
-        print(list(tf.metrics.precision(target, predict)))
-        return modelo, ds_train
+        # salvando o shape das features e criando entrada da RNA
+        shape_ftr = tf.compat.v1.data.get_output_shapes(ds_train)
+        shape_ftr = (shape_ftr[0].num_elements(), shape_ftr[1].num_elements())
+
+        aux = len(df_train_c) // 10
+        batch_size = aux if aux > 0 else 1
+        ds_train = ds_train.batch(batch_size)
+
+        feature_col = [tf.feature_column.numeric_column(key='x', shape=shape_ftr)]
+
+        def train_input_fn():
+            def gen1(a, b):
+                return {'x': a}, b
+
+            ds = ds_train.map(gen1)
+            itr = tf.compat.v1.data.make_one_shot_iterator(ds)
+            data, labels = itr.get_next()
+            return data, labels
+
+        def predict_input_fn():
+            def gen1(a, b):
+                return {'x': a}, b
+
+            ds = ds_eval.map(gen1)
+            itr = tf.compat.v1.data.make_one_shot_iterator(ds)
+            data, _ = itr.get_next()
+            return data, None
+
+        if classificador is None:
+            learning_rate = params['learning_rate'] if 'learning_rate' in params else 0.01
+            classificador = tf.estimator.DNNClassifier(
+                hidden_units=params['hidden_units'] if 'hidden_units' in params else [10],
+                n_classes=n_classes,
+                feature_columns=feature_col,
+                optimizer=tf.compat.v1.train.GradientDescentOptimizer(learning_rate)
+            )
+
+        if type(classificador) is tf.estimator.DNNClassifier:
+            steps = params['steps'] if 'steps' in params else 10000
+            classificador.train(train_input_fn, steps=steps)
+            target_pr = np.array([pr['class_ids'][0] for pr in classificador.predict(predict_input_fn)])
+            # retornando o valor original dos labels
+            for i in range(len(target_pr)):
+                target_pr[i] = lbs_dic_[target_pr[i]]
+            for i in range(len(target_ev)):
+                target_ev[i] = lbs_dic_[target_ev[i]]
+        else:
+            print('Erro: tipo de classificador não reconhecido')
+            return None
+
+    elif tipo_class == SVM:
+        if classificador is None:
+            # ToDo: checar se parametros correspondem aos tipos e se são validos
+            classificador = svm.SVC(
+                kernel=params['kernel'] if 'kernel' in params else 'linear',
+                degree=params['degree'] if 'degree' in params else 3,
+                gamma=params['gamma'] if 'gamma' in params else 'auto',
+                coef0=params['coef0'] if 'coef0' in params else 0.0,
+                tol=params['tol'] if 'tol' in params else 1e-3
+            )
+        if type(classificador) is svm.SVC:
+            classificador.fit(data_train_flatted, target)
+            target_pr = classificador.predict(data_eval_flatted)
+        else:
+            print('Erro: tipo de classificador não reconhecido')
+            return None
+
+    else:
+        print('Erro: algoritmo de aprendizado não reconhecido')
+        return None
+
+    avaliacao = {
+        'accuracy': metrics.accuracy_score(target_ev, target_pr),
+        'balanced_accuracy': metrics.balanced_accuracy_score(target_ev, target_pr),
+        'precision': metrics.precision_score(target_ev, target_pr, average='micro'),
+        'recall': metrics.recall_score(target_ev, target_pr, average='micro'),
+        'f1': metrics.f1_score(target_ev, target_pr, average='micro'),
+        'brier_score_loss': metrics.brier_score_loss(target_ev, target_pr),
+        'confusion_matrix': metrics.confusion_matrix(target_ev, target_pr)
+    }
+
+    if tipo_class == SVM:
+        return classificador, avaliacao
+    if tipo_class == RNA:
+        return classificador, avaliacao, lbs_dic_
 
 
-def classificar(raster, classificador, path=None, nome=None):
+def classificar(raster, mask, caracteristicas, classificador, path=None, nome=None, lbs_dict=None):
     """
+        Executa o processo de classificação do raster, em que cada pixel da região assumirá o valor da classe calculada
+        Necessário passar o classificador construído na função treinar_modelo
 
     Args:
-        raster:
-        classificador:
-        path:
-        nome:
+        raster (gdal.Dataset): raster a ser extraída as características e classificada
+        mask (gdal.Dataset): raster máscara que define as regiões segmentadas
+        caracteristicas (list): lista com nome das características a serem extraídas
+        classificador (Union[tf.estimator.DNNClassifier, svm.SVC]):
+        path (str): diretório que será salvo o raster classificado
+        nome (str): nome do arquivo que será salvo o raster classificado
+        lbs_dict (dict): dicionário de conversão dos labels para uso do classificador RNA
 
     Returns:
 
     """
+
     if path:
         if not os.path.exists(path):
             print('Diretório não existe')
             return None
+    dest = cria_destino(path, nome, raster.GetDescription(), extra='class')
 
-    dest = cria_destino(path, nome, raster.GetDescription())
+    if type(classificador) is not tf.estimator.DNNClassifier and type(classificador) is not svm.SVC:
+        print('Erro do classificador')
+        return None
+
+    if not caracteristicas:
+        print('Necessário lista de características')
+        return None
+
+    # checando e preparando raster
+    raster_t = type(raster)
+    if raster_t is gdal.Dataset:
+        bandas = get_bandas(raster)
+        # readasarray converte todas 3 bandas
+        for i in range(len(bandas)):
+            bandas[i] = bandas[i].ReadAsArray()
+        np_raster = np.dstack(tuple(bandas))
+        # np_raster = gdal2nparray(bandas)
+    else:
+        print('Erro no tipo')
+        return None
+
+    # checando o preparando mask
+    mask_t = type(mask)
+    if mask_t is gdal.Dataset:
+        mask_b = get_bandas(mask)
+
+        np_mask = mask_b.ReadAsArray()
+    else:
+        print('Erro no tipo')
+        return None
+
+    features_ext = extrair_caracteristicas(np_raster, np_mask, caracteristicas)
+    if features_ext is None:
+        print('Erro na extração')
+        return None
+    features, reg = prepara_features(features_ext, 'reg')
+
+    if type(classificador) is tf.estimator.DNNClassifier:
+        if not lbs_dict:
+            print('Necessário dicionário de labels')
+            return None
+        elif not len(lbs_dict):
+            print('Dicionário de labels vazio')
+            return None
+
+        ds_eval = tf.data.Dataset.from_tensor_slices(features)
+        ds_eval = ds_eval.batch(1)
+
+        def predict_input_fn():
+            def gen1(a):
+                return {'x': a}
+
+            ds = ds_eval.map(gen1)
+            itr = tf.compat.v1.data.make_one_shot_iterator(ds)
+            data = itr.get_next()
+            return data, None
+
+        target_pr = np.array([pr['class_ids'][0] for pr in classificador.predict(predict_input_fn)])
+
+        # corrigindo ao label correto
+        for i in range(len(target_pr)):
+            target_pr[i] = lbs_dict[target_pr[i]]
+
+    elif type(classificador) is svm.SVC:
+        target_pr = classificador.predict(features)
+
+    col = mask.RasterXSize
+    row = mask.RasterYSize
+    geo_transf = mask.GetGeoTransform()
+    proj = mask.GetProjection()
+
+    driver = gdal.GetDriverByName(TIFF)
+    raster_class = driver.Create(dest, col, row, 1, gdal.GDT_Byte)
+
+    # adicionando as informações geográficas
+    raster_class.SetGeoTransform(geo_transf)
+    raster_class.SetProjection(proj)
+
+    np_class = np.copy(np_mask)
+    for i in range(len(reg)):
+        rows, cols = np.where(np_class == reg[i])
+        np_class[rows, cols] = target_pr[i]
+
+    # escrevendo os dados das bandas no raster
+    raster_class.GetRasterBand(1).WriteArray(np_class)
+
+    # atualizando as alterações no raster
+    raster_class.FlushCache()
+
+    return raster_class
+
