@@ -1169,7 +1169,6 @@ def treinar_modelo(df_train, tipo_class, df_eval=None, class_col='classe', id_co
 
     elif tipo_class == SVM:
         if classificador is None:
-            # ToDo: checar se parametros correspondem aos tipos e se são validos
             classificador = svm.SVC(
                 kernel=params['kernel'] if 'kernel' in params else 'linear',
                 degree=params['degree'] if 'degree' in params else 3,
@@ -1293,6 +1292,7 @@ def classificar(raster, mask, caracteristicas, classificador, path=None, nome=No
 
     elif type(classificador) is svm.SVC:
         target_pr = classificador.predict(features)
+
 
     col = mask.RasterXSize
     row = mask.RasterYSize
