@@ -1,13 +1,15 @@
 from osgeo import gdal, ogr
 
 from skimage import segmentation
-from skimage.exposure import histogram
+from skimage.exposure import histogram, adjust_gamma, equalize_hist
 from skimage.color import rgb2grey
 from skimage.feature import local_binary_pattern, hog, greycomatrix, greycoprops
-from skimage import img_as_uint
+from skimage.filters import median, gaussian, sobel, laplace
+from skimage import img_as_uint, img_as_ubyte, img_as_float64
 
 from scipy.stats import entropy, kurtosis
 from scipy.ndimage import variance
+from scipy.fftpack import fft2, ifft2, fftshift, ifftshift
 
 import pandas as pd
 
@@ -28,6 +30,14 @@ from tempfile import gettempdir
 TIFF = 'GTiff'
 RNA = 0
 SVM = 1
+FT_GAMA = 0
+FT_EQLHIST = 1
+FT_MEDIANA = 2
+FT_GAUSS = 3
+FT_SOBEL = 4
+FT_LAPLACE = 5
+FT_FPB_IDEAL = 6
+FT_FPA_IDEAL = 7
 CI_RGB = {1: gdal.GCI_RedBand, 2: gdal.GCI_GreenBand, 3: gdal.GCI_BlueBand}
 DTYPE_CVT = {gdal.GDT_Byte: np.uint8, gdal.GDT_UInt16: np.uint16}
 
@@ -603,9 +613,9 @@ def gdal2nparray(raster):
     """
 
     Args:
-        raster:
+        raster (gdal.Dataset):
 
-    Returns:
+    Returns: np.ndarray:
 
     """
     raster_t = type(raster)
@@ -688,12 +698,6 @@ def calc_assimetria(banda, mean, std, npix):
     return (1/ndvp) * np.sum(soma)
 
 
-def calc_energia(hst, npix):
-    prob = np.array(hst, dtype=np.float)
-    prob /= npix
-    return np.sum(prob ** 2)
-
-
 def extrair_carac_regiao(regiao, caracteristicas):
     """
         Extração das caracterísitcas:
@@ -718,13 +722,11 @@ def extrair_carac_regiao(regiao, caracteristicas):
     b1 = regiao[..., 0]
     b2 = regiao[..., 1]
     b3 = regiao[..., 2]
-    reg_g = img_as_uint(rgb2grey(regiao))
 
     # total de pixels
     b1_npix = calc_total_pixels(b1)
     b2_npix = calc_total_pixels(b2)
     b3_npix = calc_total_pixels(b3)
-    npix = calc_total_pixels(reg_g)
 
     # média
     b1_mean = b2_mean = b3_mean = mean = None
@@ -732,7 +734,6 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b1_mean = np.mean(b1)
         b2_mean = np.mean(b2)
         b3_mean = np.mean(b3)
-        mean = np.mean(reg_g)
 
         features = features.assign(media=[[b1_mean, b2_mean, b3_mean, mean]])
 
@@ -742,7 +743,6 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b1_std = np.std(b1)
         b2_std = np.std(b2)
         b3_std = np.std(b3)
-        std = np.std(reg_g)
 
         features = features.assign(dsv_p=[[b1_std, b2_std, b3_std, std]])
 
@@ -752,70 +752,60 @@ def extrair_carac_regiao(regiao, caracteristicas):
             b1_mean = np.mean(b1)
             b2_mean = np.mean(b2)
             b3_mean = np.mean(b3)
-            mean = np.mean(reg_g)
         if not b1_std:
             b1_std = np.std(b1)
             b2_std = np.std(b2)
             b3_std = np.std(b3)
-            std = np.std(reg_g)
 
         b1_ast = calc_assimetria(b1, b1_mean, b1_std, b1_npix)
         b2_ast = calc_assimetria(b2, b2_mean, b2_std, b2_npix)
         b3_ast = calc_assimetria(b3, b3_mean, b3_std, b3_npix)
-        ast = calc_assimetria(reg_g, mean, std, npix)
 
-        features = features.assign(ast=[[b1_ast, b2_ast, b3_ast, ast]])
+        features = features.assign(ast=[[b1_ast, b2_ast, b3_ast]])
 
     # variancia
     if 'var' in caracteristicas:
         b1_var = variance(b1)
         b2_var = variance(b1)
         b3_var = variance(b1)
-        var = variance(reg_g)
 
-        features = features.assign(var=[[b1_var, b2_var, b3_var, var]])
+        features = features.assign(var=[[b1_var, b2_var, b3_var]])
 
     # histograma
     if 'ent' or 'crt' in caracteristicas:
         b1_hst, _ = histogram(b1, nbins=b1.max())  # alterar nbins de acordo com dtype
         b2_hst, _ = histogram(b2, nbins=b2.max())  # alterar nbins de acordo com dtype
         b3_hst, _ = histogram(b3, nbins=b3.max())  # alterar nbins de acordo com dtype
-        hst, _ = histogram(reg_g, nbins=reg_g.max())
 
         # entropia  - hst
         if 'ent' in caracteristicas:
             b1_ent = entropy(b1_hst)
             b2_ent = entropy(b2_hst)
             b3_ent = entropy(b3_hst)
-            ent = entropy(hst)
 
-            features = features.assign(ent=[[b1_ent, b2_ent, b3_ent, ent]])
+            features = features.assign(ent=[[b1_ent, b2_ent, b3_ent]])
 
         # curtose - hst
         if 'crt' in caracteristicas:
             b1_crt = kurtosis(b1_hst)
             b2_crt = kurtosis(b2_hst)
             b3_crt = kurtosis(b3_hst)
-            crt = kurtosis(hst)
 
-            features = features.assign(crt=[[b1_crt, b2_crt, b3_crt, crt]])
+            features = features.assign(crt=[[b1_crt, b2_crt, b3_crt]])
 
     # lbp
     if 'lbp' in caracteristicas:
         b1_lbp = local_binary_pattern(b1, 8, 1, method='ror')
         b2_lbp = local_binary_pattern(b2, 8, 1, method='ror')
         b3_lbp = local_binary_pattern(b3, 8, 1, method='ror')
-        lbp = local_binary_pattern(reg_g, 8, 1, method='ror')
 
         b1_lbp_h, _ = histogram(b1_lbp.ravel())
         b2_lbp_h, _ = histogram(b2_lbp.ravel())
         b3_lbp_h, _ = histogram(b3_lbp.ravel())
-        lbp_h, _ = histogram(lbp)
 
         b1_min = b1_lbp_h.min()
         b2_min = b2_lbp_h.min()
         b3_min = b3_lbp_h.min()
-        mini = lbp_h.min()
 
         # ToDo: melhorar normalização
         #   -> checar se só serão utilizados o primeiro e o último do histograma
@@ -824,11 +814,7 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
         b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
 
-        b1_lbp_h = (b1_lbp_h - b1_min) / (b1_lbp_h.max() - b1_min)
-        b2_lbp_h = (b2_lbp_h - b2_min) / (b2_lbp_h.max() - b2_min)
-        b3_lbp_h = (b3_lbp_h - b3_min) / (b3_lbp_h.max() - b3_min)
-        lbp_h = (lbp_h - mini) / (lbp_h.max() - mini)
-        features = features.assign(lbp_b1=[list(b1_lbp_h)], lbp_b2=[list(b2_lbp_h)], lbp_b3=[list(b3_lbp_h)], lbp=[list(lbp_h)])
+        features = features.assign(lbp_b1=[list(b1_lbp_h)], lbp_b2=[list(b2_lbp_h)], lbp_b3=[list(b3_lbp_h)])
 
     # hog
     if 'hog' in caracteristicas:
@@ -841,44 +827,37 @@ def extrair_carac_regiao(regiao, caracteristicas):
         b1_glcm = greycomatrix(b1, [10], [np.pi/2], levels=b1.max() + 1)
         b2_glcm = greycomatrix(b2, [10], [np.pi/2], levels=b2.max() + 1)
         b3_glcm = greycomatrix(b3, [10], [np.pi/2], levels=b3.max() + 1)
-        glcm = greycomatrix(reg_g, [10], [np.pi/2], levels=reg_g.max() + 1)
 
         glcm_res = list()
         # contrast
         glcm_res.append(greycoprops(b1_glcm, 'contrast')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'contrast')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'contrast')[0][0])
-        glcm_res.append(greycoprops(glcm, 'contrast')[0][0])
 
         # dissimilarity
         glcm_res.append(greycoprops(b1_glcm, 'dissimilarity')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'dissimilarity')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'dissimilarity')[0][0])
-        glcm_res.append(greycoprops(glcm, 'dissimilarity')[0][0])
 
         # homogeneity
         glcm_res.append(greycoprops(b1_glcm, 'homogeneity')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'homogeneity')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'homogeneity')[0][0])
-        glcm_res.append(greycoprops(glcm, 'homogeneity')[0][0])
 
         # energy
         glcm_res.append(greycoprops(b1_glcm, 'energy')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'energy')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'energy')[0][0])
-        glcm_res.append(greycoprops(glcm, 'energy')[0][0])
 
         # correlation
         glcm_res.append(greycoprops(b1_glcm, 'correlation')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'correlation')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'correlation')[0][0])
-        glcm_res.append(greycoprops(glcm, 'correlation')[0][0])
 
         # ASM
         glcm_res.append(greycoprops(b1_glcm, 'ASM')[0][0])
         glcm_res.append(greycoprops(b2_glcm, 'ASM')[0][0])
         glcm_res.append(greycoprops(b3_glcm, 'ASM')[0][0])
-        glcm_res.append(greycoprops(glcm, 'ASM')[0][0])
 
         features = features.assign(glcm=[glcm_res])
 
@@ -968,23 +947,300 @@ def extrair_caracteristicas(raster, mask, caracteristicas):
     return features
 
 
-def filtrar(raster, path=None, nome=None):
-    """
+def create_npmask(np_raster, no_data):
+    """Função auxiliar que cria uma mascara para ignorar a região sem informação do raster original
 
     Args:
-        raster:
-        path:
-        nome:
+        np_raster (np.ndarray):
+        no_data (int): valor considerado como nenhum dado no raster
 
     Returns:
-
+        (np.ndarray): mascara onde 0 será o valor da região ignorada e 1 o valor da região válida
     """
+    np_mask = np.ones(np_raster.shape, np.uint8)
+    coords = np.where(np_raster == no_data)
+    np_mask[coords] = 0
+    return np_mask
+
+
+def create_fmask(shape, r, filtro):
+    """ Função auxiliar que cria a mascara para os filtros de passa alta e baixa ideal
+
+    Args:
+        shape (tuple): shape da imagem no domínio de fourier
+        r (int): raio de distância do centro da imagem onde será definido o filtro
+        filtro(int): tipo de filtro FT_FPB_IDEAL ou FT_FPA_IDEAL
+
+    Returns:
+        (np.ndarray): mascará de acordo com o filtro ideal a ser processado
+    """
+
+    rows, cols = shape
+    cy, cx = rows // 2, cols // 2
+    y, x = np.ogrid[:rows, :cols]
+    reg = np.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+
+    if not r:
+        r = min(cx, cy, cols - cx, rows - cy)
+    if filtro == FT_FPB_IDEAL:
+        reg_mask = reg <= r
+    else:
+        reg_mask = reg > r
+
+    return reg_mask
+
+
+def realcar(np_raster, np_filtrada):
+    """ Função auxiliar que incrementa um imagem filtrada de passa alta a imagem original
+
+    Args:
+        np_raster (np.ndarray): imagem original
+        np_filtrada (np.ndarray): imagem com filtro de passa alta
+
+    Returns:
+        (np.ndarray): imagem realçada
+    """
+    return np_raster + np_filtrada
+
+
+def alto_reforco(np_raster, np_filtrada, k=1):
+    """ Função auxiliar que executa o processo de alto_reforço
+
+    Args:
+        np_raster (np.ndarray): imagem original
+        np_filtrada (np.ndarray): imagem filtrada
+        k (float): constante que multiplica mascara de nitidez
+
+    Returns:
+        (np.ndarray): imagem resultante do alto reforço
+    """
+
+    mask_nitidez = np_raster - np_filtrada
+    return np_raster + k * mask_nitidez
+
+
+def float2uint(np_raster, dtype):
+    """ Função auxiliar para converter imagens em float, resultantes de filtros, para uint8 ou uint16
+
+    Args:
+        np_raster (np.ndarray): imagem em float
+        dtype (np.dtype): dtype a ser convertido
+
+    Returns:
+        (np.ndarray): imagem em uint8 ou uint16
+    """
+
+    if dtype == np.uint16:
+        return img_as_uint(np_raster)
+    elif dtype == np.uint8:
+        return img_as_ubyte(np_raster)
+
+    print('Datatype não reconhecido')
+    return None
+
+
+def filtrar(raster, filtro, params, alto_ref=False, realce=False, path=None, nome=None):
+    """ Executa um filtro em um raster georreferenciado. O raster é convertido em uma imagem não georreferenciada,
+    onde é executado o filtro e depois é criado novamente em raster georreferenciado.
+    filtros disponíveis: correção gama, equalização do histograma, mediana, gaussiano, sobel, laplace,
+    passa baixa ideal (domínio da frequencia) e passa alta ideal (domínio da frequencia).
+
+    Possível utilizar alto reforço (high boost) nos filtros de mediana, gaussiano e passa baixa ideal (alto_ref=True).
+
+    Possível utilizar realce nos filtros de passa baixa (realce=True).
+
+
+    parametros disponíveis por filtro:
+        - FT_GAMA: 'gamma', 'gain'
+        - FT_MEDIANA: 'kernel'
+        - FT_GAUSS: 'sigma'
+        - FT_LAPLACE: 'lpc_oper'
+        - FT_FPB_IDEAL e FT_FPA_IDEAL: 'ft_raio'
+
+    Args:
+        raster(gdal.Dataset): Raster gdal a ser filtrado
+        filtro(int): Código do filtro disponível. Utilizar as constantes FT_...
+        params(dict): Dicionário com nome e valores dos parametros do filtro a ser processado
+        alto_ref(bool): Executar alto reforço com filtros de passa baixa
+        realce(bool): Executar realce com filtros de passa alta
+        path (str): diretório do arquivo raster resultante
+        nome (str): nome do arquivo raster resultante
+
+    Returns:
+        (gdal.Dataset): Raster gdal filtrado
+    """
+
     if path:
         if not os.path.exists(path):
             print('Diretório não existe')
             return None
 
-    dest = cria_destino(path, nome, raster.GetDescription())
+    raster_count = raster.RasterCount
+    np_raster = gdal2nparray(raster)
+    if np_raster is None:
+        return None
+
+    if not params:
+        params = dict()
+
+    np_filtrada = None
+    if filtro == FT_GAMA:
+        extra = 'ft_gama'
+        # ToDo: confirmar se funciona em imagem composta diretamente
+        gamma = params['gamma'] if 'gamma' in params else 1
+        if gamma < 0:
+            print('Valor de gamma não pode ser negativo')
+            return None
+        gain = params['gain'] if 'gain' in params else 1
+        np_filtrada = adjust_gamma(np_raster, gamma, gain)
+
+    elif filtro == FT_EQLHIST:
+        extra = 'ft_equal_hist'
+        np_mask = create_npmask(np_raster, raster.GetRasterBand(1).GetNoDataValue())
+        if raster_count > 1:
+            aux = list()
+            for i in range(raster_count):
+                np_band = np_raster[..., i]
+                aux.append(equalize_hist(np_band, np_band.max(), np_mask[..., i]))
+            np_filtrada = np.dstack(aux)
+        else:
+            np_filtrada = equalize_hist(np_raster, np_raster.max(), np_mask)
+        np_filtrada = float2uint(np_filtrada, np_raster.dtype)
+
+    elif filtro == FT_MEDIANA:
+        extra = 'ft_mediana'
+        np_mask = create_npmask(np_raster, raster.GetRasterBand(1).GetNoDataValue())
+        shape = params['kernel'] if 'kernel' in params else (3, 3)
+        if type(shape) is not tuple:
+            print('tipo de dado do kernel inválido')
+            return None
+        else:
+            if len(shape) != 2:
+                print('Shape do kernel inválido. exemplo correto: (x, y)')
+                return None
+        selem = np.ones(shape)
+        aux = list()
+        if raster_count > 1:
+            for i in range(raster_count):
+                aux.append(median(np_raster[..., i], selem, mask=np_mask[..., i]))
+            np_filtrada = np.dstack(tuple(aux))
+        else:
+            np_filtrada = median(np_raster, selem, mask=np_mask)
+
+        if alto_ref:
+            extra += '_alto_ref'
+            np_filtrada = alto_reforco(np_raster, np_filtrada)
+
+    elif filtro == FT_GAUSS:
+        extra = 'ft_gauss'
+        if raster.RasterCount > 1:
+            multichannel = True
+        else:
+            multichannel = False
+        sigma = params['sigma'] if 'sigma' in params else 1
+        np_filtrada = gaussian(np_raster, sigma, multichannel=multichannel, preserve_range=True)
+
+        if alto_ref:
+            extra += '_alto_ref'
+            np_filtrada = alto_reforco(np_raster, np_filtrada)
+
+    elif filtro == FT_SOBEL:
+        extra = 'ft_sobel'
+        np_mask = create_npmask(np_raster, raster.GetRasterBand(1).GetNoDataValue())
+        if raster_count > 1:
+            aux = list()
+            for i in range(raster_count):
+                aux.append(sobel(np_raster[..., i], np_mask[..., i]))
+            np_filtrada = np.dstack(tuple(aux))
+
+        else:
+            np_filtrada = sobel(np_raster, np_mask)
+
+        np_filtrada = float2uint(np_filtrada, np_raster.dtype)
+
+        if realce:
+            extra += '_realce'
+            np_filtrada = realcar(np_raster, np_filtrada)
+
+    elif filtro == FT_LAPLACE:
+        extra = 'ft_laplace'
+        np_mask = create_npmask(np_raster, raster.GetRasterBand(1).GetNoDataValue())
+        ksize = params['lpc_oper'] if 'lpc_oper' in params else 3
+        if raster_count > 1:
+            aux = list()
+            for i in range(raster_count):
+                aux.append(laplace(np_raster[..., i], ksize, np_mask[..., i]))
+            np_filtrada = np.dstack(tuple(aux))
+        else:
+            np_filtrada = laplace(np_raster, ksize, np_mask)
+
+        lpc_min = np_filtrada.min()
+        if lpc_min < 0:
+            np_filtrada = np_filtrada - lpc_min
+
+        if realce:
+            extra += '_realce'
+            np_filtrada = realcar(np_raster, np_filtrada)
+
+    elif filtro == FT_FPB_IDEAL or FT_FPA_IDEAL:
+        extra = 'ft_fourier'
+        if filtro == FT_FPB_IDEAL:
+            extra += '_pb_ideal'
+        else:
+            extra += '_pa_ideal'
+
+        r = params['ft_raio'] if 'ft_raio' in params else None
+        mask_reg = create_fmask(np_raster[..., 0].shape, r, filtro)
+
+        rst_ft = np.fft.fft2(np_raster)
+        rst_ftst = fftshift(rst_ft)
+        rst_ftst[mask_reg] = 0
+        rst_r_ft = np.fft.ifftshift(rst_ftst)
+        np_filtrada = np.abs(np.fft.ifft2(rst_r_ft))
+        r, c, b = np.where(np_raster == 0)
+        np_filtrada[r, c, b] = 0
+        if realce:
+            extra += '_realce'
+            np_filtrada = realcar(np_raster, np_filtrada)
+
+        if alto_ref:
+            extra += '_alto_ref'
+            np_filtrada = alto_reforco(np_raster, np_filtrada)
+
+    else:
+        print('Erro: filtro não reconhecido')
+        return None
+
+    if np_filtrada is not None:
+        # converter em raster
+        col = raster.RasterXSize
+        row = raster.RasterYSize
+        geo_transf = raster.GetGeoTransform()
+        proj = raster.GetProjection()
+        dtype = raster.GetRasterBand(1).DataType
+
+        dest = cria_destino(path, nome, raster.GetDescription(), extra=extra)
+        driver = gdal.GetDriverByName(TIFF)
+        raster_filtrada = driver.Create(dest, col, row, raster_count, dtype, ['PHOTOMETRIC=RGB'])
+
+        # adicionando as informações geográficas
+        raster_filtrada.SetGeoTransform(geo_transf)
+        raster_filtrada.SetProjection(proj)
+
+        # escrevendo os dados das bandas no raster
+        if raster_count == 1:
+            raster_filtrada.GetRasterBand(1).WriteArray(np_filtrada)
+        else:
+            for i in range(raster_count):
+                raster_filtrada.GetRasterBand(i + 1).WriteArray(np_filtrada[..., i])
+
+        # atualizando as alterações no raster
+        raster_filtrada.FlushCache()
+
+        return raster_filtrada
+
+    print('Erro no filtro')
+    return None
 
 
 def series2array(df, cols_ignore):
@@ -1292,7 +1548,6 @@ def classificar(raster, mask, caracteristicas, classificador, path=None, nome=No
 
     elif type(classificador) is svm.SVC:
         target_pr = classificador.predict(features)
-
 
     col = mask.RasterXSize
     row = mask.RasterYSize
