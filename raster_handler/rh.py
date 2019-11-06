@@ -2,7 +2,6 @@ from osgeo import gdal, ogr
 
 from skimage import segmentation
 from skimage.exposure import histogram, adjust_gamma, equalize_hist
-from skimage.color import rgb2grey
 from skimage.feature import local_binary_pattern, hog, greycomatrix, greycoprops
 from skimage.filters import median, gaussian, sobel, laplace
 from skimage import img_as_uint, img_as_ubyte, img_as_float64
@@ -698,7 +697,7 @@ def calc_assimetria(banda, mean, std, npix):
     return (1/ndvp) * np.sum(soma)
 
 
-def extrair_carac_regiao(regiao, caracteristicas):
+def extrair_carac_regiao(regiao, caracteristicas, params=None):
     """
         Extração das caracterísitcas:
             - hog: Histogram of Oriented Gradients
@@ -713,6 +712,7 @@ def extrair_carac_regiao(regiao, caracteristicas):
     Args:
         regiao (Union[np.ndarray, np.ma.core.MaskedArray]): região de imagem que será extraída as características
         caracteristicas (list of str): lista de características a serem extraídas
+        params (dict): parametros para o algoritmo de extração
 
     Returns:
         (list of float): lista de características extraídas
@@ -793,11 +793,33 @@ def extrair_carac_regiao(regiao, caracteristicas):
 
             features = features.assign(crt=[[b1_crt, b2_crt, b3_crt]])
 
+    if not params:
+        params = dict()
+    if type(params) is not dict:
+        print('Params precisa ser do tipo dict')
+        return None
+
     # lbp
     if 'lbp' in caracteristicas:
-        b1_lbp = local_binary_pattern(b1, 8, 1, method='ror')
-        b2_lbp = local_binary_pattern(b2, 8, 1, method='ror')
-        b3_lbp = local_binary_pattern(b3, 8, 1, method='ror')
+        if 'P' in params:
+            p = params['P']
+            if type(p) is not int:
+                print('P precisa ser um valor inteiro')
+                return None
+        else:
+            p = 8
+
+        if 'R' in params:
+            r = params['R']
+            if type(r) is not int and type(r) is not float:
+                print('R precisa ser um valor float')
+                return None
+        else:
+            r = 1
+
+        b1_lbp = local_binary_pattern(b1, p, r, method='ror')
+        b2_lbp = local_binary_pattern(b2, p, r, method='ror')
+        b3_lbp = local_binary_pattern(b3, p, r, method='ror')
 
         b1_lbp_h, _ = histogram(b1_lbp.ravel())
         b2_lbp_h, _ = histogram(b2_lbp.ravel())
@@ -818,15 +840,57 @@ def extrair_carac_regiao(regiao, caracteristicas):
 
     # hog
     if 'hog' in caracteristicas:
+        if 'pixels_per_cell' in params:
+            pixels_per_cell = params['pixels_per_cell']
+            if type(pixels_per_cell) is not tuple and len(pixels_per_cell) != 2:
+                print('Erro no parametro pixels_per_cell. Ex: (8, 8)')
+                return None
+        else:
+            pixels_per_cell = (8, 8)
+
+        if 'pixels_per_cell' in params:
+            cells_per_block = params['pixels_per_cell']
+            if type(cells_per_block) is not tuple and len(cells_per_block) != 2:
+                print('Erro no parametro cells_per_block. Ex: (3, 3)')
+                return None
+        else:
+            cells_per_block = (8, 8)
+
         h = hog(regiao, block_norm='L2-Hys', visualize=False, feature_vector=True, multichannel=True,
-                pixels_per_cell=(16, 16))
+                pixels_per_cell=pixels_per_cell, cells_per_block=cells_per_block)
         features = features.assign(hog=[list(h)])
 
     # glcm
     if 'glcm' in caracteristicas:
-        b1_glcm = greycomatrix(b1, [10], [np.pi/2], levels=b1.max() + 1)
-        b2_glcm = greycomatrix(b2, [10], [np.pi/2], levels=b2.max() + 1)
-        b3_glcm = greycomatrix(b3, [10], [np.pi/2], levels=b3.max() + 1)
+        if 'distances' in params:
+            distances = params['distances']
+            if type(distances) is list:
+                for dist in distances:
+                    if type(dist) is not int:
+                        print('Valores de distancia devem ser inteiros')
+                        return None
+            else:
+                print('Distancia devem estar em lista')
+                return None
+        else:
+            distances = [1]
+
+        if 'angles' in params:
+            angles = params['angles']
+            if type(angles) is list:
+                for ang in angles:
+                    if type(ang) is not float and type(ang) is not int:
+                        print('Valores de angulos devem ser float')
+                        return None
+            else:
+                print('Angulos devem estar em lista')
+                return None
+        else:
+            angles = [np.pi / 2]
+
+        b1_glcm = greycomatrix(b1, distances, angles, levels=b1.max() + 1)
+        b2_glcm = greycomatrix(b2, distances, angles, levels=b2.max() + 1)
+        b3_glcm = greycomatrix(b3, distances, angles, levels=b3.max() + 1)
 
         glcm_res = list()
         # contrast
@@ -864,7 +928,7 @@ def extrair_carac_regiao(regiao, caracteristicas):
     return features
 
 
-def extrair_caracteristicas(raster, mask, caracteristicas):
+def extrair_caracteristicas(raster, mask, caracteristicas, params=None):
     """
         Separa a imagem nas regiões definidas da máscara e executa a função de extração para cada região.
         Extração das caracterísitcas:
@@ -880,6 +944,7 @@ def extrair_caracteristicas(raster, mask, caracteristicas):
         raster (Union[gdal.Dataset, np.ndarray]): raster a sofrer a extração de características
         mask (Union[gdal.Dataset, np.ndarray]): raster máscara que define as divisões das regiões
         caracteristicas (list of str): lista de características a serem extraídas
+        params (dict): parametros para o algoritmo de extração
 
     Returns:
         (pd.DataFrame): DataFrame com todas as características extraídas de todas regiões
@@ -922,7 +987,7 @@ def extrair_caracteristicas(raster, mask, caracteristicas):
             print('Erro: característica inválida')
             return None
 
-    features = pd.DataFrame(columns=caracteristicas)
+    features = pd.DataFrame()
     regioes = np.unique(np_mask)
     regioes = np.delete(regioes, 0)
     for reg in regioes:
@@ -939,7 +1004,10 @@ def extrair_caracteristicas(raster, mask, caracteristicas):
             fill_value=0
         )
 
-        ftr_regiao = extrair_carac_regiao(np_reg, caracteristicas)
+        ftr_regiao = extrair_carac_regiao(np_reg, caracteristicas, params)
+        if ftr_regiao is None:
+            return None
+
         ftr_regiao = ftr_regiao.assign(reg=int(reg))
 
         features = features.append(ftr_regiao, ignore_index=True, sort=False)
@@ -1446,9 +1514,12 @@ def treinar_modelo(df_train, tipo_class, df_eval=None, class_col='classe', id_co
     avaliacao = {
         'accuracy': metrics.accuracy_score(target_ev, target_pr),
         'balanced_accuracy': metrics.balanced_accuracy_score(target_ev, target_pr),
-        'precision': metrics.precision_score(target_ev, target_pr, average='micro'),
-        'recall': metrics.recall_score(target_ev, target_pr, average='micro'),
-        'f1': metrics.f1_score(target_ev, target_pr, average='micro'),
+        'precision_micro': metrics.precision_score(target_ev, target_pr, average='micro'),
+        'recall_micro': metrics.recall_score(target_ev, target_pr, average='micro'),
+        'f1_micro': metrics.f1_score(target_ev, target_pr, average='micro'),
+        'precision': metrics.precision_score(target_ev, target_pr, average='macro'),
+        'recall': metrics.recall_score(target_ev, target_pr, average='macro'),
+        'f1': metrics.f1_score(target_ev, target_pr, average='macro'),
         'brier_score_loss': metrics.brier_score_loss(target_ev, target_pr),
         'confusion_matrix': metrics.confusion_matrix(target_ev, target_pr)
     }
@@ -1573,4 +1644,3 @@ def classificar(raster, mask, caracteristicas, classificador, path=None, nome=No
     raster_class.FlushCache()
 
     return raster_class
-
