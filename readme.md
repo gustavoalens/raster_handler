@@ -4,7 +4,7 @@ Raster Handler é uma biblioteca Python para lidar com raster utilizando a bibli
 
 ## Descrição
 
-Desenvolvido como parte parcial do projeto de Estágio Supervisionado do curso de Ciência da Computação
+Desenvolvido como parte do projeto de Estágio Supervisionado do curso de Ciência da Computação
 da [Universidade do Estado de Mato Grosso (UNEMAT) - Campus de Barra do Bugres](http://bbg.unemat.br). 
 
 Tem como objetivo lidar e executar manipulações geralmente utilizadas em raster georreferenciados,
