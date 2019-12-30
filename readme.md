@@ -20,10 +20,12 @@ Requer instalação:
 - numpy >= 1.16.2
 - scipy >= 1.2.1
 - pandas >= 0.24.2
+- scikit-learn >= 0.21.3
+- tensorflow >= 1.14.0
 
 ## Situação do projeto
 
-Em produção para ser apresentado no final do semestre de 2019/2 como avaliação parcial
+Apresentado no final do semestre de 2019/2 como avaliação parcial
  da disciplina de Estágio Supervisionado do curso de Ciência da Computação (UNEMAT - Barra do Bugres)
 
 

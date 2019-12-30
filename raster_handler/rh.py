@@ -327,10 +327,10 @@ def alterar_ref_espacial(raster, ref_nova, path=None, nome=None):
             return None
 
     # criando caminho do arquivo que será gerado
-    dest = cria_destino(path, nome, raster.GetDescription(), extra=f'EPSG:{ref_nova}')
+    dest = cria_destino(path, nome, raster.GetDescription(), extra=f'EPSG-{ref_nova}')
 
     # executando a função de utilidade Warp para atualizar referencia espacial
-    raster_ref = gdal.Warp(dest, raster, dstSRS=f'EPSG-{ref_nova}', outputType=raster.GetRasterBand(1).DataType)
+    raster_ref = gdal.Warp(dest, raster, dstSRS=f'EPSG:{ref_nova}', outputType=raster.GetRasterBand(1).DataType)
     if not raster_ref:
         print('Erro na projeção')
 
